@@ -1,0 +1,91 @@
+Gemini
+
+## Video RAG Project Context & State Summary
+
+---
+
+### Environment & Setup
+
+* **OS / Shell:** WSL2 (Ubuntu Linux) under `~/video_rag_project` *(moved off `/mnt/c/` to resolve disk I/O bottlenecks)*.
+* **Environment:** Python virtual environment (`uv` / `pip`).
+* **Dependencies Installed:** `ffmpeg` (via `apt`), `ultralytics` (YOLO), `openai-whisper`, `langchain-groq`, `google-genai`, `neo4j`, `streamlit`.
+
+---
+
+### Pipeline Architecture (3 Stages)
+
+```
+[Video Input] 
+      │
+      ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Stage 1: Dual-Stream Ingestion (ingestion.py)              │
+│ • Stream A: YOLO keyframe extraction & object detection      │
+│ • Stream B: Whisper audio transcription                     │
+│ • Frame-Passing: Keyframes saved to ./saved_frames/*.jpg    │
+│ • Output: timeline.json with timestamps & image paths       │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Stage 2: Knowledge Graph Construction (graph_builder.py)    │
+│ • Sliding Window Chunker (15s window, 5s overlap)            │
+│ • Groq Llama-3 + PydanticOutputParser (State-Event-State)   │
+│ • Gemini Embeddings: text-embedding-004 (768d / 3072d)      │
+│ • Neo4j Database: Entity/State/Event nodes + Pure Cypher    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Stage 3: Grounded Multi-Modal Q&A (retrieval_app.py)        │
+│ • Hybrid Vector & Graph Traversal in Neo4j                  │
+│ • Primary Engine: Gemini 2.0 Flash (Multimodal)             │
+│ • Fallback Engine: Groq Vision (qwen/qwen3.6-27b)           │
+└─────────────────────────────────────────────────────────────┘
+
+```
+
+---
+
+### Key Issues Resolved
+
+| Issue | Root Cause | Solution Applied |
+| --- | --- | --- |
+| **Slow package installs** | Working in Windows mount (`/mnt/c/`) | Moved project to native Linux path (`~/video_rag_project`). |
+| **'NoneType' object is not callable** | Groq tool-calling failure in `with_structured_output()` | Replaced with explicit `PydanticOutputParser` + prompt instructions. |
+| **Missing Graph Edges** | `apoc.create.relationship` deprecated in Neo4j 5.x | Replaced APOC queries with pure Cypher `FOREACH` / `MERGE` logic. |
+| **Gemini 503 Errors** | Transient API hiccups on embedding generation | Added 3-attempt exponential backoff retry loop. |
+| **Generic "Person" Identification** | Groq was text-only and couldn't see keyframe pixels | Converted retrieval to Frame-Passing RAG with direct image payloads. |
+| **Gemini 429 Quota Exceeded** | Free tier limit (15 RPM) hit during testing | Implemented primary/secondary failover to Groq's Vision API (`qwen/qwen3.6-27b`). |
+| **Groq 400 Invalid Request** | Groq Vision API supports maximum 3 images per request | Restricted fallback payload to `top_frames = image_frames[:2]`. |
+
+---
+
+### Current Strategy for Finding Unnamed People in Long Videos
+
+Sending all frames at query time crashes API limits. The two optimal strategies for long videos are:
+
+1. **Dense VLM Captioning at Ingestion:** Run a vision model (e.g., `Gemini 2.0 Flash` or `Florence-2`) during Stage 1 to generate detailed text descriptions of people/entities directly into `timeline.json`.
+2. **Multimodal Vector Search (CLIP / ImageBind):** Embed keyframes using CLIP during Stage 1 so text queries (e.g., `"Harry Styles"`) match visual image vectors directly in Neo4j, retrieving only the 1–2 relevant frames at query time.
+
+
+
+IDE
+
+I have completed all the requested upgrades and verification steps for your Video RAG pipeline:
+
+### 🌟 Project Status Summary:
+1. **Multimodal Visual Vector Search (CLIP)**:
+   * Replaced Gemini text descriptions with normalized 512-dimensional visual embeddings using `openai/clip-vit-base-patch32` at ingestion.
+   * Converted Neo4j vector search index to 512 dimensions to search directly from text query to frame images.
+   * Bypassed Google embedding APIs entirely during graph building to eliminate rate limits and costs.
+2. **Primary/Secondary Fallback Architecture**:
+   * Multimodal answering defaults to **Gemini 2.0 Flash**.
+   * If Gemini hits a 429 quota limit, the pipeline falls back to **Groq Qwen Vision (`qwen/qwen3.6-27b`)** using base64 encoded images.
+   * Sliced the image payload to a maximum of 2 frames to stay within Qwen's hard limits.
+3. **Repository Init & Local Commit**:
+   * Initialized Git inside the project directory in WSL (`~/video_rag_project`).
+   * Configured `.gitignore` to prevent tracking `.env`, `yolo11n.pt`, keyframe caches, and database credentials.
+   * Created the initial commit.
+
+Let me know if you would like to run another test query or make further changes!
