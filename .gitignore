@@ -1,0 +1,14 @@
+.env
+__pycache__/
+saved_frames/
+yolo11n.pt
+timeline.json
+.venv/
+.venv_wsl/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+cd
+cp
