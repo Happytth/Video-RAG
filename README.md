@@ -1,19 +1,14 @@
 # 🎬 Video-RAG: Multimodal Causal Video Graph RAG
 
-**Video-RAG** is an end-to-end Multimodal Video Retrieval-Augmented Generation (RAG) framework. It ingests video files using **dual-stream concurrent visual and audio processing**, builds a **State-Ev[...] 
+**Video-RAG** is an end-to-end Multimodal Video Retrieval-Augmented Generation (RAG) framework. It ingests video files using **dual-stream concurrent visual and audio processing**, builds a **State-Event-State (SES) Causal Knowledge Graph in Neo4j**, and delivers grounded answers with precise timestamp citations using **Vision-Language Models (Florence-2/CLIP)**, **Graph Neural Traversal**, and **LLMs (Gemini / Groq)**.
 
 ---
 
 ## 🎥 End-to-End Application & Output Video Demo
 
-Below is an autoplaying in-page preview of the demo (muted & looping). If your browser blocks autoplay, click the preview to start playing. A direct download link to the full MP4 is included as a fallback.
+![Multimodal Video RAG Demo Playable Animation](assets/demo_video.gif)
 
-<video controls autoplay muted loop playsinline width="100%">
-  <source src="https://cdn.jsdelivr.net/gh/Happytth/Video-RAG@main/assets/demo_video.mp4" type="video/mp4">
-  Your browser does not support the video tag. <a href="https://raw.githubusercontent.com/Happytth/Video-RAG/main/assets/demo_video.mp4">Click here to watch/download demo_video.mp4</a>
-</video>
-
-*Direct link to full demo video:* **[▶️ View / Download `assets/demo_video.mp4`](https://raw.githubusercontent.com/Happytth/Video-RAG/main/assets/demo_video.mp4)**
+* ▶️ **[Click here to watch or download the full HD MP4 video (`assets/demo_video.mp4`)](assets/demo_video.mp4)**
 
 ---
 
@@ -44,7 +39,7 @@ Below is an autoplaying in-page preview of the demo (muted & looping). If your b
 ### 1. Vision & Multimodal Models (VLM)
 | Model / Tool | Source / Architecture | Primary Purpose |
 | :--- | :--- | :--- |
-| **Florence-2** | `multimodalart/Florence-2-large-no-flash-attn` (Microsoft) | Dense visual captioning (`<MORE_DETAILED_CAPTION>`) describing detailed object interactions, spatial placement, and acti[...] 
+| **Florence-2** | `multimodalart/Florence-2-large-no-flash-attn` (Microsoft) | Dense visual captioning (`<MORE_DETAILED_CAPTION>`) describing detailed object interactions, spatial placement, and actions in frames. |
 | **BLIP** *(Fallback)* | `Salesforce/blip-image-captioning-base` | Automatic fallback vision-language model for image captioning. |
 | **YOLOv11** | `yolo11n.pt` (Ultralytics) + **ByteTrack** | Real-time object detection and multi-person tracking (`Person_1`, `Person_2`). |
 | **OpenAI CLIP** | `openai/clip-vit-base-patch32` | 512d visual vector embeddings for zero-shot text-to-frame image retrieval. |
@@ -130,7 +125,8 @@ Video-RAG/
 ├── retrieval_app.py        # Stage 3 & 4: Vector Search, Causal Cypher Traversal & LLM Answer Synthesis
 ├── main.py                 # CLI Execution Pipeline Orchestrator
 ├── assets/                 # UI Screenshots & video demonstration
-│   ├── demo_video.mp4
+│   ├── demo_video.gif      # Playable animated preview
+│   ├── demo_video.mp4      # Full HD MP4 video file
 │   ├── demo_ingestion_uploader.png
 │   ├── demo_timeline_log.png
 │   ├── demo_neo4j_graph.png
