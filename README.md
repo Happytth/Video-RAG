@@ -6,12 +6,10 @@
 
 ## 🎥 End-to-End Application & Output Video Demo
 
-Below is the demo video embedded so visitors can play it directly on the README (fallback download link provided).
+Below is an animated GIF preview of the demo (full MP4 is still available via the link). Replace `assets/demo_video.gif` with the actual GIF file in the `assets/` folder.
 
-<video controls width="100%">
-  <source src="https://raw.githubusercontent.com/Happytth/Video-RAG/main/assets/demo_video.mp4" type="video/mp4">
-  Your browser does not support the video tag. <a href="https://raw.githubusercontent.com/Happytth/Video-RAG/main/assets/demo_video.mp4">Click here to watch/download demo_video.mp4</a>
-</video>
+<img src="assets/demo_video.gif" alt="Demo video GIF" width="100%">
+
 
 *Direct link to full demo video:* **[▶️ View / Download `assets/demo_video.mp4`](https://raw.githubusercontent.com/Happytth/Video-RAG/main/assets/demo_video.mp4)**
 
