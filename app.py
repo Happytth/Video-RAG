@@ -1,8 +1,18 @@
+import sys
 import os
 import json
 import tempfile
 import warnings
 import streamlit as st
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -175,7 +185,6 @@ with st.sidebar:
 
     st.subheader("LLM API Keys")
     groq_key = st.text_input("GROQ API KEY", value=os.environ.get("GROQ_API_KEY", ""), type="password")
-    gemini_key = st.text_input("GEMINI API KEY", value=os.environ.get("GEMINI_API_KEY", ""), type="password")
 
     st.subheader("Neo4j Database Config")
     neo4j_uri = st.text_input("Neo4j URI", value=os.environ.get("NEO4J_URI", "bolt://localhost:7687"))
@@ -185,8 +194,6 @@ with st.sidebar:
     # Export credentials to environment on change
     if groq_key:
         os.environ["GROQ_API_KEY"] = groq_key
-    if gemini_key:
-        os.environ["GEMINI_API_KEY"] = gemini_key
     if neo4j_uri:
         os.environ["NEO4J_URI"] = neo4j_uri
     if neo4j_user:
@@ -199,12 +206,8 @@ with st.sidebar:
     st.subheader("Services Status")
     
     status_groq = "status-active" if groq_key else "status-inactive"
-    label_groq = "Connected" if groq_key else "Missing GROQ_API_KEY"
+    label_groq = "Connected (Groq Vision & LLM)" if groq_key else "Missing GROQ_API_KEY"
     st.markdown(f"**Groq Cloud API**: <span class='status-badge {status_groq}'>{label_groq}</span>", unsafe_allow_html=True)
-    
-    status_gemini = "status-active" if gemini_key else "status-inactive"
-    label_gemini = "Connected" if gemini_key else "Missing GEMINI_API_KEY"
-    st.markdown(f"**Google Gemini API**: <span class='status-badge {status_gemini}'>{label_gemini}</span>", unsafe_allow_html=True)
 
 # Main Page Header Layout
 st.markdown("""
@@ -249,14 +252,13 @@ with tab1:
         whisper_model = st.selectbox("Whisper Audio Model", ["base", "tiny", "small", "Skip Audio Ingestion"], index=0)
         
         # Action Button for Stage 1 Ingestion
-        if st.button("Start Stage 1 Ingestion"):
+        if st.button("Start Stage 1 Ingestion", type="primary"):
             if not st.session_state.uploaded_video_path:
                 st.error("Please upload a video file first.")
             else:
-                with st.spinner("Processing video (Extracting frames, running YOLO object detection, transcribing audio)..."):
+                with st.spinner("Processing video (Extracting keyframe images, running YOLO, Whisper audio, and Shazam)..."):
                     try:
                         timeline_json = "timeline.json"
-                        # Handle skip audio case
                         w_model = None if whisper_model == "Skip Audio Ingestion" else whisper_model
                         
                         run_ingestion(
@@ -267,12 +269,11 @@ with tab1:
                             whisper_model=w_model
                         )
                         
-                        # Load processed timeline data
                         if os.path.exists(timeline_json):
                             with open(timeline_json, "r", encoding="utf-8") as f:
                                 st.session_state.timeline_data = json.load(f)
                             st.session_state.video_processed = True
-                            st.success("Stage 1 Ingestion completed! Timeline generated.")
+                            st.success("Stage 1 Ingestion completed! Timeline generated. Switch to Tab 2 to build the Knowledge Graph.")
                         else:
                             st.error("Ingestion failed: timeline.json was not created.")
                     except Exception as e:
@@ -326,14 +327,14 @@ with tab2:
         if st.button("Construct Knowledge Graph"):
             if not st.session_state.video_processed:
                 st.error("Please run Stage 1 Ingestion first.")
-            elif not groq_key or not gemini_key:
-                st.error("Both GROQ_API_KEY and GEMINI_API_KEY must be provided in the Connection Center.")
+            elif not groq_key:
+                st.error("GROQ_API_KEY must be provided in the Connection Center.")
             else:
                 with st.spinner("Extracting causal relations using Groq and generating embeddings..."):
                     try:
                         run_graph_builder(
                             timeline_json_path="timeline.json",
-                            gemini_api_key=gemini_key,
+                            groq_api_key=groq_key,
                             neo4j_uri=neo4j_uri,
                             neo4j_user=neo4j_user,
                             neo4j_password=neo4j_pwd,
@@ -403,8 +404,8 @@ with tab3:
                          placeholder="e.g., What objects are present in the video and what is the sequence of events?")
     
     if st.button("Execute Causal Query") and query:
-        if not groq_key or not gemini_key:
-            st.error("Both GROQ_API_KEY and GEMINI_API_KEY must be provided in the Connection Center.")
+        if not groq_key:
+            st.error("GROQ_API_KEY must be provided in the Connection Center or .env file.")
         else:
             with st.spinner("Searching Neo4j vector space & traversing causal chains..."):
                 try:
@@ -412,7 +413,7 @@ with tab3:
                         neo4j_uri=neo4j_uri,
                         neo4j_user=neo4j_user,
                         neo4j_password=neo4j_pwd,
-                        gemini_api_key=gemini_key
+                        groq_api_key=groq_key
                     )
                     
                     # Run RAG Query
@@ -421,11 +422,7 @@ with tab3:
                     
                     # Render Grounded Answer Card
                     st.markdown("### 📝 Grounded Synthesis Answer")
-                    st.markdown(f"""
-                    <div style='background-color: #1e1b4b; padding: 20px; border-left: 6px solid #4f46e5; border-radius: 8px; font-size: 1.1rem; line-height: 1.6; margin-bottom: 24px;'>
-                        {res["answer"]}
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(res["answer"])
                     
                     # Display retrieved visual frames passed to LLM
                     image_paths = res.get("image_paths", [])

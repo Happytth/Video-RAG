@@ -65,7 +65,6 @@ def main():
     if not args.skip_graph:
         run_graph_builder(
             timeline_json_path=args.timeline_json,
-            gemini_api_key=api_key,
             neo4j_uri=args.neo4j_uri,
             neo4j_user=args.neo4j_user,
             neo4j_password=args.neo4j_password
@@ -79,8 +78,7 @@ def main():
         retriever = CausalVideoRetriever(
             neo4j_uri=args.neo4j_uri,
             neo4j_user=args.neo4j_user,
-            neo4j_password=args.neo4j_password,
-            gemini_api_key=api_key
+            neo4j_password=args.neo4j_password
         )
         try:
             res = retriever.query_video_rag(args.query)

@@ -10,11 +10,25 @@ This module processes an input .mp4 video through two concurrent streams:
 
 from __future__ import annotations
 
+import sys
 import os
 import json
 import argparse
 import warnings
 from typing import List, Dict, Any, Optional
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+def log_to_terminal(msg: str):
+    """Prints log messages directly to standard stdout and forces physical terminal output via sys.__stdout__."""
+    print(msg, flush=True)
+    if hasattr(sys, "__stdout__") and sys.__stdout__ is not None:
+        try:
+            sys.__stdout__.write(str(msg) + "\n")
+            sys.__stdout__.flush()
+        except Exception:
+            pass
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -34,15 +48,64 @@ except ImportError:
     YOLO = None
 
 try:
-    from transformers import CLIPProcessor, CLIPModel
+    from shazamio import Shazam
+except ImportError:
+    Shazam = None
+
+try:
+    from scenedetect import detect, AdaptiveDetector
+except ImportError:
+    detect, AdaptiveDetector = None, None
+
+try:
+    from transformers import AutoProcessor, AutoModelForCausalLM, PretrainedConfig
     import torch
     from PIL import Image as PILImage
+    setattr(PretrainedConfig, "forced_bos_token_id", None)
+    setattr(PretrainedConfig, "forced_eos_token_id", None)
+    if hasattr(AutoModelForCausalLM, "_supports_sdpa"):
+        pass
+    else:
+        setattr(AutoModelForCausalLM, "_supports_sdpa", True)
 except ImportError:
-    CLIPProcessor = None
-    CLIPModel = None
+    AutoProcessor = None
+    AutoModelForCausalLM = None
+    PretrainedConfig = None
     torch = None
     PILImage = None
 
+
+def recognize_background_song(video_path: str) -> Optional[Dict[str, str]]:
+    """Uses Shazam acoustic fingerprinting to identify background music in the video."""
+    if Shazam is None:
+        return None
+    
+    import asyncio
+    async def _shazam_task():
+        try:
+            print(f"[Stream B] Running Shazam acoustic song recognition on {video_path}...")
+            shazam = Shazam()
+            out = await shazam.recognize(video_path)
+            track = out.get("track", {})
+            if track:
+                title = track.get("title", "")
+                artist = track.get("subtitle", "")
+                genre = track.get("genres", {}).get("primary", "Music")
+                if title and artist:
+                    print(f"[Shazam Recognized] Song: '{title}' by {artist} ({genre})")
+                    return {"title": title, "artist": artist, "genre": genre}
+        except Exception as e:
+            print(f"[Shazam Warning] Song recognition failed: {e}")
+        return None
+
+    try:
+        return asyncio.run(_shazam_task())
+    except Exception:
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(_shazam_task())
+        except Exception:
+            return None
 
 
 def format_timestamp(seconds: float) -> str:
@@ -52,31 +115,94 @@ def format_timestamp(seconds: float) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
-def generate_clip_image_embedding(image_path: str) -> List[float]:
-    """Generates a 512-dimensional normalized visual vector embedding for a local image path using CLIP."""
-    if CLIPModel is None or CLIPProcessor is None or torch is None or PILImage is None:
-        raise ImportError("transformers and torch packages are required for CLIP image embedding extraction.")
-    
-    global _clip_model, _clip_processor, _clip_device
-    if "_clip_model" not in globals():
-        print("[Embedder] Loading CLIP model (openai/clip-vit-base-patch32)...")
-        globals()["_clip_processor"] = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        globals()["_clip_model"] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        globals()["_clip_model"] = globals()["_clip_model"].to(device)
-        globals()["_clip_device"] = device
-    
-    device = globals()["_clip_device"]
-    processor = globals()["_clip_processor"]
-    model = globals()["_clip_model"]
+def generate_dense_caption(image_path: str) -> str:
+    """Generates a rich, highly-detailed dense text caption for a local image using Microsoft Florence-2 (or BLIP fallback)."""
+    if PILImage is None or torch is None:
+        log_to_terminal("[VLM Warning] torch or PIL packages are required for VLM dense captioning.")
+        return ""
 
-    image = PILImage.open(image_path)
-    inputs = processor(images=image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        image_features = model.get_image_features(**inputs)
-    # L2 normalize
-    image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-    return image_features[0].tolist()
+    if not os.path.exists(image_path):
+        return ""
+
+    global _florence_model, _florence_processor, _florence_device
+    if "_florence_model" not in globals():
+        try:
+            import transformers.models.roberta.tokenization_roberta as roberta_tok
+            if not hasattr(roberta_tok.RobertaTokenizer, "additional_special_tokens"):
+                setattr(roberta_tok.RobertaTokenizer, "additional_special_tokens", property(lambda self: []))
+        except Exception:
+            pass
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        florence_loaded = False
+        for fl_model_name in ["multimodalart/Florence-2-large-no-flash-attn", "microsoft/Florence-2-large", "microsoft/Florence-2-base"]:
+            log_to_terminal(f"[VLM Ingestion] Attempting to load Florence-2 model ({fl_model_name}) on {device}...")
+            try:
+                processor = AutoProcessor.from_pretrained(fl_model_name, trust_remote_code=True)
+                model = AutoModelForCausalLM.from_pretrained(fl_model_name, trust_remote_code=True).to(device)
+                globals()["_florence_processor"] = processor
+                globals()["_florence_model"] = model
+                globals()["_florence_device"] = device
+                florence_loaded = True
+                log_to_terminal(f"[VLM Ingestion] Successfully loaded model '{fl_model_name}' on {device}!")
+                break
+            except Exception as err:
+                log_to_terminal(f"[VLM Warning] {fl_model_name} loading failed: {err}")
+
+        if not florence_loaded:
+            log_to_terminal("[VLM Warning] Florence-2 initialization failed. Trying BLIP fallback...")
+            globals()["_florence_model"] = None
+
+    device = globals().get("_florence_device", "cuda" if torch.cuda.is_available() else "cpu")
+    processor = globals().get("_florence_processor")
+    model = globals().get("_florence_model")
+
+    image = PILImage.open(image_path).convert("RGB")
+
+    if model is not None and processor is not None:
+        try:
+            prompt = "<MORE_DETAILED_CAPTION>"
+            inputs = processor(text=prompt, images=image, return_tensors="pt").to(device)
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    input_ids=inputs["input_ids"],
+                    pixel_values=inputs["pixel_values"],
+                    max_new_tokens=256,
+                    num_beams=3,
+                    do_sample=False
+                )
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            parsed = processor.post_process_generation(generated_text, task="<MORE_DETAILED_CAPTION>", image_size=(image.width, image.height))
+            if isinstance(parsed, dict) and "<MORE_DETAILED_CAPTION>" in parsed:
+                caption = parsed["<MORE_DETAILED_CAPTION>"].strip()
+            else:
+                caption = str(generated_text).replace("<MORE_DETAILED_CAPTION>", "").strip()
+            return caption
+        except Exception as err:
+            log_to_terminal(f"[VLM Warning] Florence-2 inference failed for '{image_path}': {err}")
+
+    # Rock-solid BLIP VLM fallback
+    try:
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        global _blip_model, _blip_processor
+        if "_blip_model" not in globals():
+            log_to_terminal("[VLM Ingestion] Loading BLIP model (Salesforce/blip-image-captioning-base)...")
+            globals()["_blip_processor"] = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            globals()["_blip_model"] = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
+        
+        b_proc = globals()["_blip_processor"]
+        b_mod = globals()["_blip_model"]
+        inputs = b_proc(image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = b_mod.generate(**inputs, max_new_tokens=100)
+        caption = b_proc.decode(out[0], skip_special_tokens=True)
+        return caption.strip()
+    except Exception as b_err:
+        log_to_terminal(f"[VLM Warning] Fallback BLIP captioning failed for '{image_path}': {b_err}")
+        return ""
+
+
+
 
 
 def process_stream_a_visuals(
@@ -101,6 +227,17 @@ def process_stream_a_visuals(
         print(f"[Stream A] Setting open-vocabulary target classes: {custom_classes}")
         model.set_classes(custom_classes)
 
+    # Clean up old saved frames from previous ingestions to guarantee fresh frame extraction for new uploads
+    frames_dir = "./saved_frames"
+    if os.path.exists(frames_dir):
+        for file in os.listdir(frames_dir):
+            if file.endswith(".jpg") or file.endswith(".png"):
+                try:
+                    os.remove(os.path.join(frames_dir, file))
+                except Exception:
+                    pass
+    os.makedirs(frames_dir, exist_ok=True)
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video file: {video_path}")
@@ -110,60 +247,161 @@ def process_stream_a_visuals(
     duration_sec = total_frames / video_fps if video_fps > 0 else 0
     print(f"[Stream A] Video metadata: {video_fps:.2f} FPS, {total_frames} frames, {duration_sec:.2f}s duration.")
 
-    # Calculate frame step interval to sample at target_fps
-    frame_step = max(1, int(round(video_fps / target_fps)))
-    
-    visual_logs: List[Dict[str, Any]] = []
-    frame_idx = 0
+    # Pillar 1: PySceneDetect Dynamic Scene Boundary Detection
+    scenes_list = []
+    if detect is not None and AdaptiveDetector is not None:
+        log_to_terminal("[Stream A] Running PySceneDetect (AdaptiveDetector) for semantic scene boundaries...")
+        try:
+            detected_scenes = detect(video_path, AdaptiveDetector())
+            for sc in detected_scenes:
+                s_start = round(sc[0].seconds, 2)
+                s_end = round(sc[1].seconds, 2)
+                # Safeguard: if scene > 10.0s, split into 10-second sub-chunks
+                if s_end - s_start > 10.0:
+                    sub_start = s_start
+                    while sub_start < s_end:
+                        sub_end = min(round(sub_start + 10.0, 2), s_end)
+                        if sub_end - sub_start >= 0.5:
+                            scenes_list.append((sub_start, sub_end))
+                        sub_start = sub_end
+                elif s_end - s_start >= 0.5:
+                    scenes_list.append((s_start, s_end))
+            log_to_terminal(f"[Stream A] PySceneDetect found {len(scenes_list)} semantic scene chunks.")
+        except Exception as e:
+            log_to_terminal(f"[Stream A Warning] PySceneDetect failed ({e}). Falling back to visual state tracking.")
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    visual_chunks: List[Dict[str, Any]] = []
 
-        if frame_idx % frame_step == 0:
-            timestamp_sec = round(frame_idx / video_fps, 2)
-            timestamp_fmt = format_timestamp(timestamp_sec)
-
-            # Run inference
-            results = model.predict(frame, conf=conf_threshold, verbose=False, device="cpu")
+    if scenes_list:
+        # Process PySceneDetect scenes directly via Midpoint Keyframe Extraction
+        for sc_idx, (sc_start, sc_end) in enumerate(scenes_list):
+            midpoint_sec = round((sc_start + sc_end) / 2.0, 2)
+            frame_num = int(round(midpoint_sec * video_fps))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            
+            frame_filename = f"frame_{int(midpoint_sec)}.jpg"
+            frame_path = os.path.join(frames_dir, frame_filename)
             detected_objects = set()
+            detected_person_ids = set()
 
-            for result in results:
-                for box in result.boxes:
-                    cls_id = int(box.cls[0])
-                    class_name = model.names[cls_id]
-                    confidence = float(box.conf[0])
-                    detected_objects.add(class_name)
+            if ret and frame is not None:
+                cv2.imwrite(frame_path, frame)
+                try:
+                    results = model.track(frame, persist=True, tracker="bytetrack.yaml", conf=conf_threshold, verbose=False, device="cpu")
+                except Exception:
+                    results = model.predict(frame, conf=conf_threshold, verbose=False, device="cpu")
 
-            # Save representative frame to ./saved_frames/
-            os.makedirs("./saved_frames", exist_ok=True)
-            frame_filename = f"frame_{int(timestamp_sec)}.jpg"
-            frame_path = os.path.join("./saved_frames", frame_filename)
-            if not os.path.exists(frame_path):
+                for result in results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        class_name = model.names[cls_id]
+                        detected_objects.add(class_name)
+                        if class_name.lower() == "person" or cls_id == 0:
+                            if hasattr(box, "id") and box.id is not None:
+                                track_id = int(box.id[0])
+                                detected_person_ids.add(f"Person_{track_id}")
+                            else:
+                                detected_person_ids.add("Person_1")
+            
+            # Run Dense VLM Captioning (Florence-2 / BLIP) on preserved keyframe
+            dense_caption = generate_dense_caption(frame_path)
+
+            visual_chunks.append({
+                "start_sec": sc_start,
+                "end_sec": sc_end,
+                "timestamp_formatted": f"{format_timestamp(sc_start)} - {format_timestamp(sc_end)}",
+                "objects": sorted(list(detected_objects)),
+                "detected_person_ids": sorted(list(detected_person_ids)),
+                "image_path": f"./saved_frames/{frame_filename}",
+                "dense_caption": dense_caption
+            })
+    else:
+        # Fallback to YOLO visual state tracking
+        frame_step = max(1, int(round(video_fps / target_fps)))
+        max_chunk_sec = 10.0 # Safeguard max chunk duration
+        current_chunk = {"start": 0.0, "objects": set(), "frames": []}
+        frame_idx = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % frame_step == 0:
+                timestamp_sec = round(frame_idx / video_fps, 2)
+                timestamp_fmt = format_timestamp(timestamp_sec)
+
+                results = model.predict(frame, conf=conf_threshold, verbose=False, device="cpu")
+                detected_objects = set()
+                for result in results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        detected_objects.add(model.names[cls_id])
+
+                frame_filename = f"frame_{int(timestamp_sec)}.jpg"
+                frame_path = os.path.join(frames_dir, frame_filename)
                 cv2.imwrite(frame_path, frame)
 
-            # Generate CLIP vector embedding from the saved image
-            try:
-                clip_emb = generate_clip_image_embedding(frame_path)
-            except Exception as emb_err:
-                print(f"[Embedder Warning] Failed to compute CLIP embedding for '{frame_path}': {emb_err}")
-                clip_emb = None
+                frame_data = {
+                    "frame_idx": frame_idx,
+                    "timestamp_sec": timestamp_sec,
+                    "timestamp_formatted": timestamp_fmt,
+                    "objects": detected_objects,
+                    "image_path": f"./saved_frames/{frame_filename}",
+                    "num_objects": len(detected_objects)
+                }
 
-            visual_logs.append({
-                "frame_idx": frame_idx,
-                "timestamp_sec": timestamp_sec,
-                "timestamp_formatted": timestamp_fmt,
-                "objects": sorted(list(detected_objects)),
-                "image_path": f"./saved_frames/{frame_filename}",
-                "clip_embedding": clip_emb
+                objects_changed = (detected_objects != current_chunk["objects"]) and (len(current_chunk["objects"]) > 0)
+                duration_exceeded = (timestamp_sec - current_chunk["start"]) >= max_chunk_sec
+
+                if objects_changed or duration_exceeded:
+                    chunk_start = current_chunk["start"]
+                    chunk_end = timestamp_sec
+                    chunk_frames = current_chunk["frames"]
+                    midpoint_sec = (chunk_start + chunk_end) / 2.0
+                    best_frame = min(
+                        chunk_frames,
+                        key=lambda f: (-f["num_objects"], abs(f["timestamp_sec"] - midpoint_sec))
+                    ) if chunk_frames else frame_data
+
+                    dense_caption = generate_dense_caption(best_frame["image_path"])
+
+                    visual_chunks.append({
+                        "start_sec": chunk_start,
+                        "end_sec": chunk_end,
+                        "timestamp_formatted": f"{format_timestamp(chunk_start)} - {format_timestamp(chunk_end)}",
+                        "objects": sorted(list(current_chunk["objects"])),
+                        "image_path": best_frame["image_path"],
+                        "dense_caption": dense_caption
+                    })
+
+                    current_chunk = {"start": timestamp_sec, "objects": set(detected_objects), "frames": [frame_data]}
+                else:
+                    current_chunk["objects"].update(detected_objects)
+                    current_chunk["frames"].append(frame_data)
+
+            frame_idx += 1
+
+        if current_chunk["frames"]:
+            chunk_start = current_chunk["start"]
+            chunk_end = duration_sec if duration_sec > chunk_start else chunk_start + 1.0
+            chunk_frames = current_chunk["frames"]
+            midpoint_sec = (chunk_start + chunk_end) / 2.0
+            best_frame = min(chunk_frames, key=lambda f: (-f["num_objects"], abs(f["timestamp_sec"] - midpoint_sec)))
+            dense_caption = generate_dense_caption(best_frame["image_path"])
+            visual_chunks.append({
+                "start_sec": chunk_start,
+                "end_sec": chunk_end,
+                "timestamp_formatted": f"{format_timestamp(chunk_start)} - {format_timestamp(chunk_end)}",
+                "objects": sorted(list(current_chunk["objects"])),
+                "image_path": best_frame["image_path"],
+                "dense_caption": dense_caption
             })
 
-        frame_idx += 1
-
     cap.release()
-    print(f"[Stream A] Extracted {len(visual_logs)} visual detection frames across video.")
-    return visual_logs
+    log_to_terminal(f"[Stream A] Created {len(visual_chunks)} dynamic semantic chunks.")
+    return visual_chunks
 
 
 def process_stream_b_audio(
@@ -195,6 +433,17 @@ def process_stream_b_audio(
         return []
 
     transcript_segments: List[Dict[str, Any]] = []
+
+    # Run Shazam acoustic song recognition
+    song_info = recognize_background_song(video_path)
+    if song_info:
+        transcript_segments.append({
+            "start_sec": 0.0,
+            "end_sec": 5.0,
+            "timestamp_formatted": "00:00 - 00:05",
+            "text": f"[Background Music Track]: '{song_info['title']}' by {song_info['artist']} ({song_info['genre']})"
+        })
+
     for segment in result.get("segments", []):
         start_sec = round(segment["start"], 2)
         end_sec = round(segment["end"], 2)
@@ -213,62 +462,38 @@ def process_stream_b_audio(
 
 
 def synchronize_streams(
-    visual_logs: List[Dict[str, Any]],
-    transcript_segments: List[Dict[str, Any]],
-    granularity_sec: float = 5.0
+    visual_chunks: List[Dict[str, Any]],
+    transcript_segments: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
-    Merge Visual Stream A and Audio Stream B into a unified chronological timeline list of time windows.
+    Merge Visual Stream A dynamic event chunks and Audio Stream B transcript segments into a unified timeline.
     """
-    print(f"[Merge] Synchronizing visual logs and audio transcript at {granularity_sec}s granularity...")
-    
-    max_time_sec = 0.0
-    if visual_logs:
-        max_time_sec = max(max_time_sec, visual_logs[-1]["timestamp_sec"])
-    if transcript_segments:
-        max_time_sec = max(max_time_sec, transcript_segments[-1]["end_sec"])
+    log_to_terminal(f"[Merge] Synchronizing {len(visual_chunks)} dynamic visual event chunks with audio transcripts...")
 
     timeline: List[Dict[str, Any]] = []
-    curr_time = 0.0
 
-    while curr_time <= max_time_sec:
-        window_end = round(curr_time + granularity_sec, 2)
-        
-        # Collect objects detected within [curr_time, window_end]
-        window_objects = set()
-        window_image_path = None
-        best_log = None
-        for log in visual_logs:
-            if curr_time <= log["timestamp_sec"] < window_end:
-                window_objects.update(log["objects"])
-                if log.get("image_path"):
-                    if best_log is None or len(log["objects"]) > len(best_log["objects"]):
-                        best_log = log
+    for v_chunk in visual_chunks:
+        c_start = v_chunk["start_sec"]
+        c_end = v_chunk["end_sec"]
 
-        window_clip_embedding = None
-        if best_log:
-            window_image_path = best_log["image_path"]
-            window_clip_embedding = best_log.get("clip_embedding")
-
-        # Collect spoken text overlapping with [curr_time, window_end]
+        # Collect spoken text overlapping with dynamic window [c_start, c_end]
         window_transcripts = []
         for seg in transcript_segments:
-            if not (seg["end_sec"] <= curr_time or seg["start_sec"] >= window_end):
+            if not (seg["end_sec"] <= c_start or seg["start_sec"] >= c_end):
                 window_transcripts.append(seg["text"])
 
         timeline.append({
-            "window_start": curr_time,
-            "window_end": window_end,
-            "timestamp_formatted": f"{format_timestamp(curr_time)} - {format_timestamp(window_end)}",
-            "visual_objects": sorted(list(window_objects)),
+            "window_start": c_start,
+            "window_end": c_end,
+            "timestamp_formatted": v_chunk["timestamp_formatted"],
+            "visual_objects": v_chunk["objects"],
+            "detected_person_ids": v_chunk.get("detected_person_ids", []),
             "transcript_text": " ".join(window_transcripts).strip(),
-            "image_path": window_image_path,
-            "clip_embedding": window_clip_embedding
+            "image_path": v_chunk["image_path"],
+            "dense_caption": v_chunk.get("dense_caption", "")
         })
 
-        curr_time = window_end
-
-    print(f"[Merge] Created synchronized timeline with {len(timeline)} time windows.")
+    log_to_terminal(f"[Merge] Created synchronized timeline with {len(timeline)} dynamic semantic time windows.")
     return timeline
 
 
@@ -301,9 +526,8 @@ def run_ingestion(
     )
 
     timeline = synchronize_streams(
-        visual_logs=visual_logs,
-        transcript_segments=transcript_segments,
-        granularity_sec=granularity_sec
+        visual_chunks=visual_logs,
+        transcript_segments=transcript_segments
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)

@@ -22,11 +22,25 @@ Key Architectural Features:
 
 from __future__ import annotations
 
+import sys
 import os
 import json
 import argparse
 import time
 from typing import List, Dict, Any, Literal, Optional
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+def log_to_terminal(msg: str):
+    """Prints log messages directly to standard stdout and forces physical terminal output via sys.__stdout__."""
+    print(msg, flush=True)
+    if hasattr(sys, "__stdout__") and sys.__stdout__ is not None:
+        try:
+            sys.__stdout__.write(str(msg) + "\n")
+            sys.__stdout__.flush()
+        except Exception:
+            pass
 from pydantic import BaseModel, Field
 
 try:
@@ -67,7 +81,7 @@ class Node(BaseModel):
     description: str = Field(description="Detailed entity description")
     timestamp: str = Field(description="Format MM:SS")
     image_path: Optional[str] = Field(default=None, description="Path to representative video frame image")
-    clip_embedding: Optional[list[float]] = Field(default=None, description="512-dimensional CLIP embedding vector")
+    dense_caption: Optional[str] = Field(default="", description="Florence-2 detailed visual caption")
 
 
 class Edge(BaseModel):
@@ -114,9 +128,11 @@ def chunk_timeline_sliding_window(
 
         if matching_blocks:
             combined_objects = set()
+            combined_person_ids = set()
             combined_transcripts = []
             for b in matching_blocks:
                 combined_objects.update(b.get("visual_objects", []))
+                combined_person_ids.update(b.get("detected_person_ids", []))
                 if b.get("transcript_text"):
                     combined_transcripts.append(b["transcript_text"])
 
@@ -136,6 +152,7 @@ def chunk_timeline_sliding_window(
                 "chunk_end": curr_end,
                 "timestamp_range": f"{format_sec(curr_start)} - {format_sec(curr_end)}",
                 "visual_objects": sorted(list(combined_objects)),
+                "detected_person_ids": sorted(list(combined_person_ids)),
                 "transcript_text": " ".join(combined_transcripts).strip(),
                 "image_path": chunk_image_path,
                 "clip_embedding": chunk_clip_embedding
@@ -197,9 +214,17 @@ INSTRUCTIONS FOR STATE-EVENT-STATE (SES) EXTRACTION:
    - (State) -[DURING]-> (Event): State co-occurs alongside the Event.
 4. Ensure every node has a clear, factual description, timestamp, approximate time in seconds, and list of involved objects.
 5. Create unique, descriptive string IDs for each node (e.g. "state_apple_on_table_00m10s", "event_pick_apple_00m14s").
+6. CRITICAL ANTI-HALLUCINATION RULE: Detected Visual Objects are automated hints. Only extract States and Events for actions/entities directly grounded in scene context or speech. Do NOT invent hallucinated objects or actions (e.g., horses, cars, animals) unless strictly confirmed.
 
 Extract the SES graph strictly conforming to the requested JSON schema.
 """
+
+
+def get_groq_api_keys() -> List[str]:
+    """Retrieves list of available Groq API keys from environment for key rotation."""
+    keys_str = os.environ.get("GROQ_API_KEYS", "") or os.environ.get("GROQ_API_KEY", "")
+    keys = [k.strip() for k in keys_str.replace(";", ",").split(",") if k.strip()]
+    return keys if keys else [""]
 
 
 def extract_ses_graph_from_chunk(
@@ -209,6 +234,7 @@ def extract_ses_graph_from_chunk(
 ) -> Optional[SESGraph]:
     """
     Calls Groq API using LangChain with_structured_output to extract SES graph nodes and edges cleanly.
+    Supports multi-key rotation to bypass Free Tier rate limits seamlessly.
     """
     if ChatGroq is None:
         raise ImportError(
@@ -222,31 +248,32 @@ def extract_ses_graph_from_chunk(
         transcript_text=chunk["transcript_text"] if chunk["transcript_text"] else "No speech"
     )
 
-    max_retries = 5
-    for attempt in range(max_retries):
+    available_keys = get_groq_api_keys()
+    if groq_api_key and groq_api_key not in available_keys:
+        available_keys.insert(0, groq_api_key)
+
+    for key_idx, key in enumerate(available_keys):
         try:
-            # Enforce strict 0.0 temperature for JSON parsing stability
             llm = ChatGroq(
                 model=model_name,
                 temperature=0.0,
-                api_key=groq_api_key
+                api_key=key
             )
-            
             structured_llm = llm.with_structured_output(SESGraph)
             res = structured_llm.invoke(prompt)
-            
-            # Artificial sleep to avoid Groq Free Tier API rate limits (30 RPM)
-            time.sleep(2.0)
-            
+            time.sleep(1.0)
             return res
         except Exception as e:
-            if ("429" in str(e) or "rate limit" in str(e).lower()) and attempt < max_retries - 1:
-                sleep_time = (attempt + 1) * 30
-                print(f"[Groq 429 Rate Limit] Retrying in {sleep_time}s... (Error: {e})")
-                time.sleep(sleep_time)
-            else:
-                print(f"[Groq Extraction Error] Failed chunk {chunk['timestamp_range']}: {e}")
-                return None
+            if ("429" in str(e) or "rate limit" in str(e).lower()):
+                if key_idx < len(available_keys) - 1:
+                    print(f"[Groq Key Rotation] Key #{key_idx + 1} rate limited. Rotating to Key #{key_idx + 2} immediately...")
+                    continue
+                elif model_name != "llama-3.1-8b-instant":
+                    print(f"[Groq 429 Rate Limit] All API keys exhausted on {model_name}. Switching fallback to 'llama-3.1-8b-instant'...")
+                    return extract_ses_graph_from_chunk(available_keys[0], chunk, model_name="llama-3.1-8b-instant")
+            
+            print(f"[Groq Extraction Error] Failed chunk {chunk['timestamp_range']}: {e}")
+            return None
 
 
 # ============================================================================
@@ -254,52 +281,73 @@ def extract_ses_graph_from_chunk(
 # ============================================================================
 
 def generate_node_embeddings(
-    client: genai.Client,
+    gemini_api_key: Optional[str],
     nodes: List[Dict[str, Any]],
     embedding_model: str = "text-embedding-004"
 ) -> List[Dict[str, Any]]:
     """
-    Generates 768-dimensional vector embeddings for each node description.
+    Generates 3072-dimensional vector embeddings for each node by combining node description and Florence-2 dense caption.
     """
-    resolved_model = embedding_model
-    # Dynamic fallback to developer API equivalent if text-embedding-004 is missing
-    if "text-embedding-004" in embedding_model:
+    log_to_terminal(f"[Embedder] Generating 3072d text embeddings for {len(nodes)} unique nodes...")
+    
+    client = None
+    if gemini_api_key and genai is not None:
         try:
-            available = [m.name for m in client.models.list()]
-            if "models/gemini-embedding-2" in available:
-                resolved_model = "models/gemini-embedding-2"
-            elif "models/gemini-embedding-001" in available:
-                resolved_model = "models/gemini-embedding-001"
+            client = genai.Client(api_key=gemini_api_key)
         except Exception:
-            resolved_model = "models/gemini-embedding-2"
+            client = None
 
-    print(f"[Embedder] Generating embeddings using '{resolved_model}' for {len(nodes)} unique nodes...")
     for node in nodes:
-        text_to_embed = f"{node['node_type']}: {node['description']} (Timestamp: {node['timestamp']})"
+        desc = node.get("description", "")
+        objs = ", ".join(node.get("objects", [])) if node.get("objects") else "None"
+        caption = node.get("dense_caption", "")
+        transcript = node.get("transcript_text", "")
+        
+        # Pillar 4: Omni-Knowledge Fusion Text Representation
+        text_to_embed = f"{node.get('node_type', 'Entity')}: {desc} | Objects: {objs} | Visual Caption: {caption} | Audio Speech: {transcript}".strip()
+        
         embedded_successfully = False
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                res = client.models.embed_content(
-                    model=resolved_model,
-                    contents=text_to_embed
-                )
-                node["embedding"] = res.embeddings[0].values
-                embedded_successfully = True
-                break
-            except Exception as e:
-                if ("503" in str(e) or "429" in str(e) or "unavailable" in str(e).lower()) and attempt < max_retries - 1:
-                    sleep_time = (attempt + 1) * 3
-                    print(f"[Embedder Warning] Gemini API transient error ({e}). Retrying in {sleep_time}s...")
-                    time.sleep(sleep_time)
-                else:
-                    print(f"[Embedding Error] Failed node '{node['id']}': {e}")
+        if client:
+            max_retries = 3
+            for model_name in ["models/gemini-embedding-2", "text-embedding-004", "models/gemini-embedding-001"]:
+                for attempt in range(max_retries):
+                    try:
+                        res = client.models.embed_content(
+                            model=model_name,
+                            contents=text_to_embed
+                        )
+                        emb_vals = res.embeddings[0].values
+                        if len(emb_vals) < 3072:
+                            emb_vals = emb_vals + [0.0] * (3072 - len(emb_vals))
+                        elif len(emb_vals) > 3072:
+                            emb_vals = emb_vals[:3072]
+                        node["embedding"] = emb_vals
+                        embedded_successfully = True
+                        break
+                    except Exception as e:
+                        if ("503" in str(e) or "429" in str(e) or "unavailable" in str(e).lower()) and attempt < max_retries - 1:
+                            time.sleep((attempt + 1) * 2)
+                        else:
+                            break
+                if embedded_successfully:
                     break
 
         if not embedded_successfully:
-            # Fallback zero vector matching current resolved model dim
-            fallback_dim = 3072 if "embedding-2" in resolved_model else 768
-            node["embedding"] = [0.0] * fallback_dim
+            # Deterministic fallback text embedding generator for 3072d vector space
+            import hashlib
+            import math
+            tokens = text_to_embed.lower().split()
+            vector = [0.0] * 3072
+            for token in tokens:
+                h_val = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+                idx = h_val % 3072
+                val = ((h_val >> 16) % 1000) / 1000.0
+                vector[idx] += val
+            # L2 normalize fallback vector
+            norm = math.sqrt(sum(v * v for v in vector))
+            if norm > 0:
+                vector = [v / norm for v in vector]
+            node["embedding"] = vector
 
     return nodes
 
@@ -316,7 +364,7 @@ class Neo4jSESWriter:
     def close(self):
         self.driver.close()
 
-    def setup_schema_and_vector_index(self, vector_dim: int = 768):
+    def setup_schema_and_vector_index(self, vector_dim: int = 3072):
         """Creates uniqueness constraints and vector index on Neo4j database."""
         with self.driver.session(database=self.database) as session:
             print("[Neo4j Schema] Setting up uniqueness constraints...")
@@ -372,7 +420,8 @@ class Neo4jSESWriter:
             e.time_seconds = n.time_seconds,
             e.objects = n.objects,
             e.embedding = n.embedding,
-            e.image_path = n.image_path
+            e.image_path = n.image_path,
+            e.dense_caption = n.dense_caption
         FOREACH (ignore IN CASE WHEN n.node_type = 'State' THEN [1] ELSE [] END |
             SET e:State)
         FOREACH (ignore IN CASE WHEN n.node_type = 'Event' THEN [1] ELSE [] END |
@@ -401,12 +450,34 @@ class Neo4jSESWriter:
             MERGE (src)-[:DURING {explanation: r.explanation}]->(tgt))
         """
 
+        insert_person_cypher = """
+        UNWIND $nodes AS n
+        UNWIND n.detected_person_ids AS pid
+        WITH n, pid WHERE pid IS NOT NULL AND pid <> ''
+        MERGE (p:Person {id: pid})
+        ON CREATE SET p.created_at = timestamp()
+        WITH p, n
+        MATCH (s:Entity {id: n.id})
+        MERGE (p)-[:APPEARS_IN]->(s)
+        """
+
         with self.driver.session(database=self.database) as session:
+            # Purge stale nodes from previous video runs to ensure clean single-video graph context
+            session.run("MATCH (n) DETACH DELETE n")
+            print("[Neo4j Ingest] Purged stale graph nodes from previous runs.")
+
             # Batch write nodes
             res_nodes = session.run(insert_nodes_cypher, nodes=nodes)
             summary_nodes = res_nodes.consume()
             print(f"[Neo4j Ingest Debug] Nodes query consumed. Counters: {summary_nodes.counters}")
             
+            # Batch write Person nodes & APPEARS_IN relationships
+            try:
+                session.run(insert_person_cypher, nodes=nodes)
+                print("[Neo4j Ingest] Created (:Person) nodes and linked APPEARS_IN relationships.")
+            except Exception as p_err:
+                print(f"[Neo4j Ingest Debug] Person nodes creation warning: {p_err}")
+
             # Batch write relationships with APOC check
             try:
                 res_rels = session.run(insert_rels_cypher, rels=relationships)
@@ -424,29 +495,23 @@ class Neo4jSESWriter:
 
 def run_graph_builder(
     timeline_json_path: str = "timeline.json",
+    groq_api_key: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
     neo4j_uri: str = os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
     neo4j_user: str = os.environ.get("NEO4J_USER", os.environ.get("NEO4J_USERNAME", "neo4j")),
     neo4j_password: str = os.environ.get("NEO4J_PASSWORD", "password"),
     window_size_sec: float = 15.0,
     overlap_sec: float = 5.0,
-    gemini_model: str = "gemini-2.0-flash",
-    embedding_model: str = "text-embedding-004"
+    **kwargs
 ):
     print("=" * 60)
     print("STAGE 2: SES KNOWLEDGE GRAPH CONSTRUCTION (GROQ)")
     print("=" * 60)
 
     # 1. Initialize API Keys
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key:
-        raise ValueError("GROQ_API_KEY must be provided as an environment variable in your .env file.")
-
-    g_api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY")
-    if not g_api_key:
-        raise ValueError("GEMINI_API_KEY must be provided or set as environment variable to compute embeddings.")
-
-    client = genai.Client(api_key=g_api_key)
+    active_groq_key = groq_api_key or os.environ.get("GROQ_API_KEY")
+    if not active_groq_key:
+        raise ValueError("GROQ_API_KEY must be provided as an argument or set in environment variables.")
 
     with open(timeline_json_path, "r", encoding="utf-8") as f:
         timeline = json.load(f)
@@ -480,7 +545,7 @@ def run_graph_builder(
     print(f"[Groq SES] Extracting graph triples from {len(chunks)} chunks...")
     for idx, chunk in enumerate(chunks, 1):
         print(f" -> Processing Chunk {idx}/{len(chunks)} ({chunk['timestamp_range']})...")
-        extracted = extract_ses_graph_from_chunk(groq_api_key, chunk, model_name=groq_model)
+        extracted = extract_ses_graph_from_chunk(active_groq_key, chunk, model_name=groq_model)
         
         if extracted:
             # Map Pydantic Node schema to Neo4j ingestion format
@@ -500,8 +565,9 @@ def run_graph_builder(
                         "timestamp": n.timestamp,
                         "time_seconds": parse_timestamp_to_seconds(n.timestamp),
                         "objects": objects_list,
+                        "detected_person_ids": chunk.get("detected_person_ids", []),
                         "image_path": chunk.get("image_path"),
-                        "embedding": chunk.get("clip_embedding") or ([0.0] * 512)
+                        "dense_caption": chunk.get("dense_caption", n.dense_caption or "")
                     }
             
             # Map Pydantic Edge schema to Neo4j relationship format
@@ -523,8 +589,8 @@ def run_graph_builder(
         print("[Warning] No nodes were extracted. Skipping database write.")
         return
 
-    # Step 3: Skip Gemini description embedding, use pre-generated visual CLIP embeddings
-    nodes_with_embeddings = nodes_list
+    # Step 3: Generate 3072d text embeddings using description + Florence-2 dense caption
+    nodes_with_embeddings = generate_node_embeddings(gemini_api_key, nodes_list)
 
     # Step 4: Write to Neo4j
     vector_dim = len(nodes_with_embeddings[0]["embedding"]) if nodes_with_embeddings else 768
