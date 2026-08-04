@@ -4,6 +4,18 @@
 
 ---
 
+## 🎥 End-to-End Application & Output Video Demo
+
+https://github.com/user-attachments/assets/demo_video.mp4 (stored in repository as [`assets/demo_video.mp4`](assets/demo_video.mp4))
+
+<video src="assets/demo_video.mp4" controls="controls" width="100%">
+  Your browser does not support HTML5 video playback. <a href="assets/demo_video.mp4">Click here to watch/download demo_video.mp4</a>
+</video>
+
+*Direct link to full demo video:* **[▶️ View / Download `assets/demo_video.mp4`](assets/demo_video.mp4)**
+
+---
+
 ## 📸 Dashboard & User Interface Screenshots
 
 | Stage 1: Video File Ingestion | Stage 1: Chronological Timeline Log |
@@ -116,7 +128,8 @@ Video-RAG/
 ├── graph_builder.py        # Stage 2: Sliding Window Chunking & Neo4j SES Graph Construction
 ├── retrieval_app.py        # Stage 3 & 4: Vector Search, Causal Cypher Traversal & LLM Answer Synthesis
 ├── main.py                 # CLI Execution Pipeline Orchestrator
-├── assets/                 # UI Screenshots & demo assets
+├── assets/                 # UI Screenshots & video demonstration
+│   ├── demo_video.mp4
 │   ├── demo_ingestion_uploader.png
 │   ├── demo_timeline_log.png
 │   └── demo_neo4j_graph.png
