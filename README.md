@@ -4,6 +4,18 @@
 
 ---
 
+## 📸 Dashboard & User Interface Screenshots
+
+| Stage 1: Video File Ingestion | Stage 1: Chronological Timeline Log |
+| :---: | :---: |
+| ![Dual-Stream Video Ingestion](assets/demo_ingestion_uploader.png) | ![Synchronized Timeline Log](assets/demo_timeline_log.png) |
+
+| Stage 2: Neo4j Knowledge Graph Construction & Live Stats |
+| :---: |
+| ![Neo4j Knowledge Graph Construction](assets/demo_neo4j_graph.png) |
+
+---
+
 ## 🌟 Key Features
 
 * 🎥 **Dual-Stream Concurrent Ingestion**: Simultaneously processes visual keyframes (YOLOv11 + Florence-2 VLM) and audio tracks (OpenAI Whisper + Shazam Music Recognition).
@@ -104,6 +116,10 @@ Video-RAG/
 ├── graph_builder.py        # Stage 2: Sliding Window Chunking & Neo4j SES Graph Construction
 ├── retrieval_app.py        # Stage 3 & 4: Vector Search, Causal Cypher Traversal & LLM Answer Synthesis
 ├── main.py                 # CLI Execution Pipeline Orchestrator
+├── assets/                 # UI Screenshots & demo assets
+│   ├── demo_ingestion_uploader.png
+│   ├── demo_timeline_log.png
+│   └── demo_neo4j_graph.png
 ├── timeline.json           # Ingested timeline output cache
 ├── yolo11n.pt              # YOLOv11 weights
 ├── requirements.txt        # Python dependency manifest
