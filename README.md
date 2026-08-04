@@ -22,9 +22,9 @@ https://github.com/user-attachments/assets/demo_video.mp4 (stored in repository 
 | :---: | :---: |
 | ![Dual-Stream Video Ingestion](assets/demo_ingestion_uploader.png) | ![Synchronized Timeline Log](assets/demo_timeline_log.png) |
 
-| Stage 2: Neo4j Knowledge Graph Construction & Live Stats |
-| :---: |
-| ![Neo4j Knowledge Graph Construction](assets/demo_neo4j_graph.png) |
+| Stage 2: Neo4j Knowledge Graph Construction & Live Stats | Stage 3: Grounded Q&A Engine & Multimodal Frame Context |
+| :---: | :---: |
+| ![Neo4j Knowledge Graph Construction](assets/demo_neo4j_graph.png) | ![Grounded Q&A Engine & Visual Frame Context](assets/demo_grounded_qa.png) |
 
 ---
 
@@ -132,7 +132,8 @@ Video-RAG/
 │   ├── demo_video.mp4
 │   ├── demo_ingestion_uploader.png
 │   ├── demo_timeline_log.png
-│   └── demo_neo4j_graph.png
+│   ├── demo_neo4j_graph.png
+│   └── demo_grounded_qa.png
 ├── timeline.json           # Ingested timeline output cache
 ├── yolo11n.pt              # YOLOv11 weights
 ├── requirements.txt        # Python dependency manifest
